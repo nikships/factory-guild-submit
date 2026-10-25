@@ -12,7 +12,7 @@ Add `-g` to install globally, or `-a droid` to target Factory Droid only.
 
 ## Requirements
 
-- A logged-in Chromium browser with the `bsk` CLI and the `browser-skill` skill, which the agent uses to drive the Guild form.
+- [BrowserSkill](https://github.com/Tencent/BrowserSkill): the `bsk` CLI, its browser extension, and the `browser-skill` skill. The agent uses them to drive the Guild form in your logged-in Chromium browser. Follow its [install guide](https://github.com/Tencent/BrowserSkill/blob/main/AGENT_INSTALL.md) if you don't have it yet.
 - A Factory Guild account signed in to that browser.
 
 ## Usage
