@@ -2,8 +2,10 @@
 // Factory Guild contribution CLI. Zero dependencies, Node 18+.
 // Talks to the same JSON API the factory.com/guild web app uses.
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, statSync, existsSync, chmodSync } from "node:fs";
-import { homedir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { createDecipheriv, pbkdf2Sync } from "node:crypto";
+import { copyFileSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, existsSync, chmodSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -12,6 +14,17 @@ const ORIGIN = new URL(BASE).origin;
 const COOKIE_NAME = "__Secure-guild_session";
 const CONFIG_DIR = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "factory-guild");
 const AUTH_FILE = join(CONFIG_DIR, "auth.json");
+const REFRESH_AFTER_MS = 12 * 60 * 60 * 1000;
+const AUTH_HINT = "Run: guild auth import (macOS Chromium browsers) or guild auth set";
+
+// Chromium browsers on macOS: profile root under Application Support, and the Keychain entry that holds the cookie key.
+const BROWSERS = [
+  { id: "chrome", name: "Chrome", dir: "Google/Chrome", service: "Chrome Safe Storage", account: "Chrome" },
+  { id: "brave", name: "Brave", dir: "BraveSoftware/Brave-Browser", service: "Brave Safe Storage", account: "Brave" },
+  { id: "edge", name: "Edge", dir: "Microsoft Edge", service: "Microsoft Edge Safe Storage", account: "Microsoft Edge" },
+  { id: "arc", name: "Arc", dir: "Arc/User Data", service: "Arc Safe Storage", account: "Arc" },
+  { id: "chromium", name: "Chromium", dir: "Chromium", service: "Chromium Safe Storage", account: "Chromium" },
+];
 
 const MANUAL_TYPES = ["text_post", "blog", "video", "project_public", "project_private"];
 const NEEDS_LINK = new Set(["text_post", "blog", "video", "project_public"]);
@@ -53,6 +66,10 @@ class CliError extends Error {
 const HELP = `factory-guild: log Factory Guild contributions from the command line
 
 Usage:
+  guild auth import [--browser <id>]
+                               macOS: copy your signed-in session from Chrome, Brave, Edge, Arc, or
+                               Chromium (ids: ${BROWSERS.map((b) => b.id).join(", ")}). macOS may ask for
+                               Keychain access.
   guild auth set [token]       Save your session (token, "name=value", or a full Cookie header).
                                Reads stdin or prompts when no token is given.
   guild auth status            Check that the saved session is still valid
@@ -71,9 +88,12 @@ submit options:
       --json                   Print machine-readable JSON
 
 Auth:
-  The token is the value of the "${COOKIE_NAME}" cookie on factory.com
-  (browser devtools > Application > Cookies > https://factory.com, path /guild).
-  FACTORY_GUILD_SESSION overrides the saved session.
+  Set up once. The session is saved to ${AUTH_FILE} and renewed automatically
+  each time you use the CLI, so it stays valid while you keep using it.
+  Without 'auth import', copy the value of the "${COOKIE_NAME}" cookie on factory.com
+  (browser devtools > Application > Cookies > https://factory.com, path /guild)
+  and run 'guild auth set'.
+  FACTORY_GUILD_SESSION overrides the saved session (it is never renewed or saved).
 `;
 
 function parseArgs(argv, spec) {
@@ -104,15 +124,56 @@ function normalizeToken(input) {
   throw new CliError(`No "${COOKIE_NAME}" cookie found in the value you provided.`, 2);
 }
 
-function loadToken() {
+function loadAuth() {
+  if (!existsSync(AUTH_FILE)) throw new CliError(`Not signed in. ${AUTH_HINT}`, 3);
+  let auth;
+  try { auth = JSON.parse(readFileSync(AUTH_FILE, "utf8")); } catch { auth = null; }
+  if (!auth || !auth.token) throw new CliError(`Saved auth file is invalid. ${AUTH_HINT}`, 3);
+  return auth;
+}
+
+function saveAuth(auth) {
+  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(AUTH_FILE, JSON.stringify(auth) + "\n", { mode: 0o600 });
+  chmodSync(AUTH_FILE, 0o600);
+}
+
+// The server re-issues the session cookie with a fresh expiry on page loads.
+// Keeping it in sync means a one-time setup keeps working while the CLI is used.
+async function refreshSession(token) {
+  try {
+    const res = await fetch(`${BASE}/submissions`, {
+      headers: { Cookie: `${COOKIE_NAME}=${token}`, "User-Agent": "factory-guild-cli" },
+      redirect: "manual",
+    });
+    if (res.status !== 200 || typeof res.headers.getSetCookie !== "function") return null;
+    for (const c of res.headers.getSetCookie()) {
+      const [pair, ...attrs] = c.split(";");
+      const eq = pair.indexOf("=");
+      if (eq < 1 || pair.slice(0, eq).trim() !== COOKIE_NAME) continue;
+      const maxAge = attrs.map((a) => a.trim().match(/^max-age=(\d+)$/i)).find(Boolean);
+      return {
+        token: pair.slice(eq + 1).trim(),
+        expires_at: maxAge ? new Date(Date.now() + Number(maxAge[1]) * 1000).toISOString() : null,
+      };
+    }
+  } catch { /* offline or blocked: keep the current token */ }
+  return null;
+}
+
+async function getToken() {
   const env = process.env.FACTORY_GUILD_SESSION;
   if (env) return normalizeToken(env);
-  if (!existsSync(AUTH_FILE)) {
-    throw new CliError(`Not signed in. Run: guild auth set\n(see "guild --help" for how to get the token)`);
+  const auth = loadAuth();
+  const last = Date.parse(auth.refreshed_at || auth.saved_at || "") || 0;
+  if (Date.now() - last > REFRESH_AFTER_MS) {
+    const fresh = await refreshSession(auth.token);
+    if (fresh) {
+      saveAuth({ ...auth, token: fresh.token, expires_at: fresh.expires_at, refreshed_at: new Date().toISOString() });
+      return fresh.token;
+    }
   }
-  const { token } = JSON.parse(readFileSync(AUTH_FILE, "utf8"));
-  if (!token) throw new CliError("Saved auth file is invalid. Run: guild auth set");
-  return token;
+  return auth.token;
 }
 
 async function readSecret(prompt) {
@@ -145,7 +206,7 @@ async function api(method, path, { token, body } = {}) {
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON body */ }
   if (res.status === 401 || (res.status >= 300 && res.status < 400)) {
-    throw new CliError("Session expired or invalid. Run: guild auth set", 3);
+    throw new CliError(`Session expired or invalid. ${AUTH_HINT}`, 3);
   }
   return { status: res.status, ok: res.ok, data };
 }
@@ -178,10 +239,101 @@ async function authSet(args) {
   if (!(await checkSession(token))) {
     throw new CliError(`The server rejected that token. Check that you copied the "${COOKIE_NAME}" value and that it has not expired.`, 3);
   }
-  mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-  writeFileSync(AUTH_FILE, JSON.stringify({ token, saved_at: new Date().toISOString() }) + "\n", { mode: 0o600 });
-  chmodSync(AUTH_FILE, 0o600);
+  await saveVerified(token);
+}
+
+async function saveVerified(token) {
+  const now = new Date().toISOString();
+  const fresh = await refreshSession(token);
+  saveAuth({ token: fresh?.token ?? token, expires_at: fresh?.expires_at ?? null, saved_at: now, refreshed_at: fresh ? now : null });
   console.log(`Signed in. Saved to ${AUTH_FILE}`);
+}
+
+function chromiumCookieKey(browser) {
+  const password = execFileSync("security", ["find-generic-password", "-w", "-s", browser.service, "-a", browser.account], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  }).trim();
+  return pbkdf2Sync(password, "saltysalt", 1003, 16, "sha1");
+}
+
+function decryptChromiumCookie(encrypted, key) {
+  const tag = encrypted.subarray(0, 3).toString();
+  if (tag !== "v10" && tag !== "v11") return null;
+  const decipher = createDecipheriv("aes-128-cbc", key, Buffer.alloc(16, 0x20));
+  let plain = Buffer.concat([decipher.update(encrypted.subarray(3)), decipher.final()]);
+  // Chrome 130+ prepends a 32-byte hash of the host key to the value.
+  if (plain.length > 32 && !plain.subarray(0, 32).every((b) => b >= 0x20 && b < 0x7f)) plain = plain.subarray(32);
+  return plain.toString("utf8");
+}
+
+// Collect candidate tokens from every profile of a browser, newest-expiring first.
+function readBrowserCandidates(browser, tmp) {
+  const root = join(homedir(), "Library", "Application Support", browser.dir);
+  if (!existsSync(root)) return [];
+  const out = [];
+  for (const profile of readdirSync(root)) {
+    if (profile !== "Default" && !/^Profile \d+$/.test(profile)) continue;
+    const dbPath = [join(root, profile, "Network", "Cookies"), join(root, profile, "Cookies")].find(existsSync);
+    if (!dbPath) continue;
+    // Copy with the write-ahead log so cookies Chrome has not flushed yet are included.
+    const copy = join(tmp, `${browser.id}-${profile.replace(/\s/g, "_")}.db`);
+    copyFileSync(dbPath, copy);
+    for (const ext of ["-wal", "-shm", "-journal"]) if (existsSync(dbPath + ext)) copyFileSync(dbPath + ext, copy + ext);
+    let rows;
+    try {
+      rows = execFileSync("sqlite3", ["-readonly", "-separator", "|", copy,
+        `select hex(encrypted_value), value, expires_utc from cookies where host_key = 'factory.com' and name = '${COOKIE_NAME}' order by expires_utc desc`],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    } catch (e) {
+      if (e.code === "ENOENT") throw new CliError("The sqlite3 command was not found. Use: guild auth set", 2);
+      continue;
+    }
+    for (const line of rows ? rows.split("\n") : []) {
+      const [hex, plain] = line.split("|");
+      out.push({ profile, hex, plain });
+    }
+  }
+  return out;
+}
+
+async function authImport(args) {
+  const { browser: only } = parseArgs(args, { "--browser": { key: "browser" } });
+  if (process.platform !== "darwin") {
+    throw new CliError("auth import only supports macOS. Use: guild auth set (see 'guild --help').", 2);
+  }
+  const browsers = BROWSERS.filter((b) => !only || b.id === only.toLowerCase());
+  if (browsers.length === 0) throw new CliError(`--browser must be one of: ${BROWSERS.map((b) => b.id).join(", ")}`, 2);
+
+  const tmp = mkdtempSync(join(tmpdir(), "factory-guild-"));
+  const notes = [];
+  try {
+    for (const browser of browsers) {
+      const candidates = readBrowserCandidates(browser, tmp);
+      if (candidates.length === 0) continue;
+      let key = null;
+      for (const c of candidates) {
+        let token = c.plain || null;
+        if (!token && c.hex) {
+          try {
+            key ??= chromiumCookieKey(browser);
+            token = decryptChromiumCookie(Buffer.from(c.hex, "hex"), key);
+          } catch {
+            notes.push(`${browser.name}: could not read the Keychain entry (access denied or cancelled).`);
+            break;
+          }
+        }
+        if (token && (await checkSession(token))) {
+          console.error(`Found a signed-in session in ${browser.name} (${c.profile}).`);
+          return void (await saveVerified(token));
+        }
+        notes.push(`${browser.name} (${c.profile}): session found but it is expired. Sign in at https://factory.com/guild and retry.`);
+      }
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  throw new CliError(`No signed-in Guild session found in your browsers.${notes.length ? `\n${[...new Set(notes)].join("\n")}` : ""}\nSign in at https://factory.com/guild/submissions, then retry, or use: guild auth set`, 3);
 }
 
 // A delete on an id that cannot exist returns 404 for a live session and 401 otherwise.
@@ -196,9 +348,9 @@ async function checkSession(token) {
 }
 
 async function authStatus() {
-  const token = loadToken();
+  const token = await getToken();
   const ok = await checkSession(token);
-  console.log(ok ? "Signed in. Session is valid." : "Session is expired or invalid. Run: guild auth set");
+  console.log(ok ? "Signed in. Session is valid." : `Session is expired or invalid. ${AUTH_HINT}`);
   if (!ok) process.exitCode = 3;
 }
 
@@ -249,7 +401,7 @@ async function submit(args) {
   if (opts.type && !MANUAL_TYPES.includes(opts.type)) throw new CliError(`--type must be one of: ${MANUAL_TYPES.join(", ")}`, 2);
   if (opts.file && links.length > 1) throw new CliError("A file can only be attached to a single-link contribution.", 2);
 
-  const token = loadToken();
+  const token = await getToken();
 
   const items = [];
   for (const link of links.length ? links : [""]) {
@@ -311,7 +463,7 @@ async function withdraw(args) {
   const { _: rest, group } = parseArgs(args, { "--group": { key: "group", bool: true } });
   const id = rest[0];
   if (!id) throw new CliError("Usage: guild withdraw [--group] <id>", 2);
-  const token = loadToken();
+  const token = await getToken();
   const path = group ? `/api/submission-groups/${encodeURIComponent(id)}` : `/api/submissions/${encodeURIComponent(id)}`;
   const res = await api("DELETE", path, { token });
   if (!res.ok) throw apiError(res);
@@ -322,10 +474,11 @@ async function main() {
   const [cmd, sub, ...rest] = process.argv.slice(2);
   if (!cmd || cmd === "-h" || cmd === "--help" || cmd === "help") return void console.log(HELP);
   if (cmd === "auth") {
+    if (sub === "import") return authImport(rest);
     if (sub === "set") return authSet(rest);
     if (sub === "status") return authStatus();
     if (sub === "logout") return authLogout();
-    throw new CliError("Usage: guild auth <set|status|logout>", 2);
+    throw new CliError("Usage: guild auth <import|set|status|logout>", 2);
   }
   const args = sub === undefined ? [] : [sub, ...rest];
   if (cmd === "submit") return submit(args);

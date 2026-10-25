@@ -14,14 +14,13 @@ Add `-g` to install globally, or `-a droid` to target Factory Droid only. Requir
 
 ## One-time auth
 
-The CLI needs your Guild session token, the `__Secure-guild_session` cookie. It is `HttpOnly`, so copy it from devtools:
+The CLI needs your Guild session, the `__Secure-guild_session` cookie on factory.com. Pick whichever route fits your setup:
 
-1. Sign in at https://factory.com/guild/submissions.
-2. Open devtools > Application > Cookies > `https://factory.com`.
-3. Copy the value of `__Secure-guild_session`.
-4. Run `guild auth set` and paste it (or ask your agent to run it).
+- **macOS with Chrome, Brave, Edge, Arc, or Chromium:** sign in at https://factory.com/guild/submissions, then run `guild auth import`. It reads the cookie from your browser's local store, and macOS may ask you to allow Keychain access. Or just ask your agent to run it.
+- **Any OS or browser:** copy the cookie yourself. In devtools go to Application > Cookies > `https://factory.com`, copy the value of `__Secure-guild_session`, and run `guild auth set` (or paste it to your agent). The cookie is `HttpOnly`, so it isn't visible to page scripts.
+- **An agent tool that can read cookies:** it can pipe the value into `guild auth set`.
 
-The CLI checks the token with the server before saving it to `~/.config/factory-guild/auth.json` (mode 0600). Sessions last about two weeks, so repeat when it expires. `FACTORY_GUILD_SESSION` overrides the saved token.
+Every route checks the token with the server, then saves it to `~/.config/factory-guild/auth.json` (mode 0600). You only do this once. The server re-issues the cookie with a fresh two-week expiry, and the CLI renews the saved session automatically whenever you use it. You'd only repeat setup after about two weeks without using it, or after signing out everywhere. `FACTORY_GUILD_SESSION` overrides the saved session for one-off use.
 
 ## Use it with your agent
 
@@ -34,9 +33,9 @@ The agent reads the link, drafts a title and description, runs a dry run, then s
 ```sh
 alias guild="node ~/.agents/skills/factory-guild-submit/scripts/guild.mjs"   # path depends on where the skill was installed
 # or run it without installing the skill:
-npx -y --allow-git=all github:nikships/factory-guild-submit auth set   # newer npm blocks git packages unless allowed
+npx -y --allow-git=all github:nikships/factory-guild-submit auth import   # newer npm blocks git packages unless allowed
 
-guild auth set
+guild auth import   # or: guild auth set
 guild auth status
 guild submit https://github.com/me/project -t "My project" -d "What it does, and how Droid helped" --dry-run
 guild submit https://github.com/me/project -t "My project" -d "What it does, and how Droid helped"

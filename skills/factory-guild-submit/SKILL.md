@@ -28,24 +28,50 @@ Check first:
 guild auth status
 ```
 
-If it says not signed in or the session is invalid, the user must provide their
-session token once. It is the `__Secure-guild_session` cookie, which is
-`HttpOnly`, so you cannot read it from page JavaScript and must ask for it:
+If it says "Signed in", skip the rest of this section. Otherwise the user needs
+to sign in once. The credential is the `__Secure-guild_session` cookie on
+`factory.com`. It is `HttpOnly`, so page JavaScript cannot read it. Try these
+in order and stop at the first that works:
 
-> Open https://factory.com/guild/submissions while signed in, open devtools
-> (Application > Cookies > https://factory.com), copy the value of
-> `__Secure-guild_session`, and paste it here.
+1. **Import it from the user's browser (macOS).** The user must be signed in at
+   https://factory.com/guild/submissions in Chrome, Brave, Edge, Arc, or
+   Chromium. Run:
 
-Save it without echoing it back or writing it anywhere else:
+   ```sh
+   guild auth import            # or: guild auth import --browser brave
+   ```
 
-```sh
-printf '%s' "$TOKEN" | guild auth set
-```
+   It reads the browser's local cookie store and decrypts the value with the
+   browser's Keychain entry. macOS may show a Keychain prompt, so tell the user
+   to allow it. If no session is found, ask them to sign in and retry.
 
-The CLI verifies the token before saving it to
-`~/.config/factory-guild/auth.json` (mode 0600). Sessions last about two weeks.
-On exit code 3 or "Session expired", ask for a fresh token. `FACTORY_GUILD_SESSION`
-overrides the saved token.
+2. **Use a tool you already have.** If you have a browser or computer-use tool
+   that can read cookies including `HttpOnly` ones (for example one driven over
+   the Chrome DevTools Protocol), read the `__Secure-guild_session` cookie for
+   `factory.com` and pass it straight to the CLI without printing it:
+
+   ```sh
+   printf '%s' "$TOKEN" | guild auth set
+   ```
+
+3. **Ask the user to paste it.** This works on any OS and browser:
+
+   > Open https://factory.com/guild/submissions while signed in, open devtools
+   > (Application > Cookies > https://factory.com), copy the value of
+   > `__Secure-guild_session`, and paste it here.
+
+   Then run the same `printf '%s' "$TOKEN" | guild auth set`.
+
+Never echo the token back or write it anywhere except through the CLI.
+
+Every route verifies the token with the server, then saves it to
+`~/.config/factory-guild/auth.json` (mode 0600). After that it is always
+available: the server re-issues the cookie with a fresh two-week expiry, and the
+CLI renews the saved session automatically, at most every 12 hours, whenever it
+runs. The user only repeats this if they go unused for about two weeks or sign
+out everywhere. On exit code 3 or "Session expired", redo the steps above.
+`FACTORY_GUILD_SESSION` overrides the saved token for one-off use (it is never
+saved or renewed).
 
 ## Inputs
 
@@ -113,7 +139,7 @@ to withdraw.
 
 | Message | Meaning |
 | --- | --- |
-| Session expired or invalid (exit 3) | Ask the user for a fresh token |
+| Session expired or invalid (exit 3) | Redo the auth steps above |
 | You already logged this | Duplicate of an existing entry, do not retry |
 | Too many contributions in review | The user must wait for reviews |
 | needs `--description` | Add a description and retry |
