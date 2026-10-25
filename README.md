@@ -34,7 +34,7 @@ The agent reads the link, drafts a title and description, runs a dry run, then s
 ```sh
 alias guild="node ~/.agents/skills/factory-guild-submit/scripts/guild.mjs"   # path depends on where the skill was installed
 # or run it without installing the skill:
-npx -y github:nikships/factory-guild-submit auth set
+npx -y --allow-git=all github:nikships/factory-guild-submit auth set   # newer npm blocks git packages unless allowed
 
 guild auth set
 guild auth status
