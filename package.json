@@ -1,0 +1,11 @@
+{
+  "name": "factory-guild-submit",
+  "version": "0.2.0",
+  "description": "Agent skill and CLI that logs contributions to your Factory Guild submissions page",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "factory-guild": "skills/factory-guild-submit/scripts/guild.mjs" },
+  "files": ["skills"],
+  "engines": { "node": ">=18" },
+  "repository": { "type": "git", "url": "git+https://github.com/nikships/factory-guild-submit.git" }
+}
