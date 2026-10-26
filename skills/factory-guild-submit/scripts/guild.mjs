@@ -17,13 +17,15 @@ const AUTH_FILE = join(CONFIG_DIR, "auth.json");
 const REFRESH_AFTER_MS = 12 * 60 * 60 * 1000;
 const AUTH_HINT = "Run: guild auth import (macOS Chromium browsers) or guild auth set";
 
-// Chromium browsers on macOS: profile root under Application Support, and the Keychain entry that holds the cookie key.
+// Chromium browsers: macOS profile root under Application Support, Linux
+// profile root under ~/.config. `linuxDir` is the Linux config directory name;
+// a browser without one is skipped on Linux (Arc has no Linux build).
 const BROWSERS = [
-  { id: "chrome", name: "Chrome", dir: "Google/Chrome", service: "Chrome Safe Storage", account: "Chrome" },
-  { id: "brave", name: "Brave", dir: "BraveSoftware/Brave-Browser", service: "Brave Safe Storage", account: "Brave" },
-  { id: "edge", name: "Edge", dir: "Microsoft Edge", service: "Microsoft Edge Safe Storage", account: "Microsoft Edge" },
-  { id: "arc", name: "Arc", dir: "Arc/User Data", service: "Arc Safe Storage", account: "Arc" },
-  { id: "chromium", name: "Chromium", dir: "Chromium", service: "Chromium Safe Storage", account: "Chromium" },
+  { id: "chrome", name: "Chrome", dir: "Google/Chrome", linuxDir: "google-chrome", service: "Chrome Safe Storage", account: "Chrome" },
+  { id: "brave", name: "Brave", dir: "BraveSoftware/Brave-Browser", linuxDir: "BraveSoftware/Brave-Browser", service: "Brave Safe Storage", account: "Brave" },
+  { id: "edge", name: "Edge", dir: "Microsoft Edge", linuxDir: "microsoft-edge", service: "Microsoft Edge Safe Storage", account: "Microsoft Edge" },
+  { id: "arc", name: "Arc", dir: "Arc/User Data", linuxDir: null, service: "Arc Safe Storage", account: "Arc" },
+  { id: "chromium", name: "Chromium", dir: "Chromium", linuxDir: "chromium", service: "Chromium Safe Storage", account: "Chromium" },
 ];
 
 const MANUAL_TYPES = ["text_post", "blog", "video", "project_public", "project_private"];
@@ -70,6 +72,10 @@ Usage:
                                macOS: copy your signed-in session from Chrome, Brave, Edge, Arc, or
                                Chromium (ids: ${BROWSERS.map((b) => b.id).join(", ")}). macOS may ask for
                                Keychain access.
+                               Linux: copy your signed-in session from Chrome, Brave, Edge, or
+                               Chromium under ~/.config. It tries secret-tool for the browser
+                               keyring password first, then the fixed "peanuts" fallback Chrome
+                               uses without a keyring.
   guild auth set [token]       Save your session (token, "name=value", or a full Cookie header).
                                Reads stdin or prompts when no token is given.
   guild auth status            Check that the saved session is still valid
@@ -249,12 +255,33 @@ async function saveVerified(token) {
   console.log(`Signed in. Saved to ${AUTH_FILE}`);
 }
 
+function browserRoot(browser) {
+  if (process.platform === "darwin") return join(homedir(), "Library", "Application Support", browser.dir);
+  return join(homedir(), ".config", browser.linuxDir);
+}
+
 function chromiumCookieKey(browser) {
-  const password = execFileSync("security", ["find-generic-password", "-w", "-s", browser.service, "-a", browser.account], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
-  return pbkdf2Sync(password, "saltysalt", 1003, 16, "sha1");
+  if (process.platform === "darwin") {
+    const password = execFileSync("security", ["find-generic-password", "-w", "-s", browser.service, "-a", browser.account], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return pbkdf2Sync(password, "saltysalt", 1003, 16, "sha1");
+  }
+  // Linux: PBKDF2 uses 1 iteration, not 1003. Try the system keyring first
+  // (Chrome stores its "Safe Storage" password there when one is available),
+  // then fall back to the fixed password Chrome uses without a keyring.
+  let password = null;
+  for (const app of ["chrome", "chromium"]) {
+    try {
+      password = execFileSync("secret-tool", ["lookup", "application", app], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (password) break;
+    } catch { /* secret-tool missing or no entry: fall through to peanuts */ }
+  }
+  return pbkdf2Sync(password || "peanuts", "saltysalt", 1, 16, "sha1");
 }
 
 function decryptChromiumCookie(encrypted, key) {
@@ -269,7 +296,8 @@ function decryptChromiumCookie(encrypted, key) {
 
 // Collect candidate tokens from every profile of a browser, newest-expiring first.
 function readBrowserCandidates(browser, tmp) {
-  const root = join(homedir(), "Library", "Application Support", browser.dir);
+  if (process.platform === "linux" && !browser.linuxDir) return [];
+  const root = browserRoot(browser);
   if (!existsSync(root)) return [];
   const out = [];
   for (const profile of readdirSync(root)) {
@@ -299,10 +327,11 @@ function readBrowserCandidates(browser, tmp) {
 
 async function authImport(args) {
   const { browser: only } = parseArgs(args, { "--browser": { key: "browser" } });
-  if (process.platform !== "darwin") {
-    throw new CliError("auth import only supports macOS. Use: guild auth set (see 'guild --help').", 2);
+  if (process.platform !== "darwin" && process.platform !== "linux") {
+    throw new CliError("auth import only supports macOS and Linux. Use: guild auth set (see 'guild --help').", 2);
   }
-  const browsers = BROWSERS.filter((b) => !only || b.id === only.toLowerCase());
+  const browsers = BROWSERS.filter((b) => (!only || b.id === only.toLowerCase())
+    && (process.platform !== "linux" || b.linuxDir));
   if (browsers.length === 0) throw new CliError(`--browser must be one of: ${BROWSERS.map((b) => b.id).join(", ")}`, 2);
 
   const tmp = mkdtempSync(join(tmpdir(), "factory-guild-"));
@@ -319,7 +348,7 @@ async function authImport(args) {
             key ??= chromiumCookieKey(browser);
             token = decryptChromiumCookie(Buffer.from(c.hex, "hex"), key);
           } catch {
-            notes.push(`${browser.name}: could not read the Keychain entry (access denied or cancelled).`);
+            notes.push(`${browser.name}: could not read the browser key (Keychain on macOS, keyring on Linux; access denied or cancelled).`);
             break;
           }
         }

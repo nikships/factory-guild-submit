@@ -17,6 +17,7 @@ Add `-g` to install globally, or `-a droid` to target Factory Droid only. Requir
 The CLI needs your Guild session, the `__Secure-guild_session` cookie on factory.com. Pick whichever route fits your setup:
 
 - **macOS with Chrome, Brave, Edge, Arc, or Chromium:** sign in at https://factory.com/guild/submissions, then run `guild auth import`. It reads the cookie from your browser's local store, and macOS may ask you to allow Keychain access. Or just ask your agent to run it.
+- **Linux with Chrome, Brave, Edge, or Chromium:** sign in at https://factory.com/guild/submissions, then run `guild auth import`. It reads the cookie from `~/.config/<browser>/Default/Network/Cookies` (or `Cookies`), tries `secret-tool` for the browser keyring password first, then falls back to the fixed `peanuts` password Chrome uses without a keyring. Linux decryption uses PBKDF2 with 1 iteration, not macOS's 1003.
 - **Any OS or browser:** copy the cookie yourself. In devtools go to Application > Cookies > `https://factory.com`, copy the value of `__Secure-guild_session`, and run `guild auth set` (or paste it to your agent). The cookie is `HttpOnly`, so it isn't visible to page scripts.
 - **An agent tool that can read cookies:** it can pipe the value into `guild auth set`.
 
